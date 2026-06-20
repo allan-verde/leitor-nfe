@@ -277,23 +277,45 @@ const NFE = (() => {
 
   const round2 = v => Math.round((v + Number.EPSILON) * 100) / 100;
 
-  // orquestração: recebe lista de {nome, conteudo(string)} e devolve tudo pronto
+  // monta o resultado final a partir das notas já parseadas
+  function _finalizar(notas, totalArquivos, erros) {
+    if (!notas.length) return { ok: false, erro: 'Os XMLs enviados não puderam ser lidos como NF-e/NFC-e.', lidos: totalArquivos, erros };
+    const empresa = detectarEmpresaMisto(notas);
+    const { entradas, saidas, indefinidas } = separarDirecao(notas, empresa.cnpj);
+    const p = periodo(entradas, saidas);
+    const preview = montarPreview(entradas, saidas, empresa, p, indefinidas);
+    preview.arquivos_lidos = totalArquivos; preview.arquivos_com_erro = erros;
+    return { ok: true, empresa, entradas, saidas, indefinidas, periodo: p, preview };
+  }
+
+  // orquestração síncrona (usada nos testes em Node)
   function processar(arquivos) {
     const notas = []; let erros = 0;
     for (const a of arquivos) {
       try { const r = parse(a.conteudo); if (r) notas.push(r); else erros++; }
       catch (e) { erros++; }
     }
-    if (!notas.length) return { ok: false, erro: 'Os XMLs enviados não puderam ser lidos como NF-e/NFC-e.', lidos: arquivos.length, erros };
-    const empresa = detectarEmpresaMisto(notas);
-    const { entradas, saidas, indefinidas } = separarDirecao(notas, empresa.cnpj);
-    const p = periodo(entradas, saidas);
-    const preview = montarPreview(entradas, saidas, empresa, p, indefinidas);
-    preview.arquivos_lidos = arquivos.length; preview.arquivos_com_erro = erros;
-    return { ok: true, empresa, entradas, saidas, indefinidas, periodo: p, preview };
+    return _finalizar(notas, arquivos.length, erros);
   }
 
-  return { parse, processar, classificaItem, categoriaCfop, detectarEmpresaMisto,
+  // orquestração assíncrona em blocos: não trava a UI mesmo com muitos XMLs.
+  // onProgress(processados, total) é chamado a cada bloco.
+  async function processarAsync(arquivos, onProgress) {
+    const notas = []; let erros = 0;
+    const CHUNK = 150;
+    for (let i = 0; i < arquivos.length; i++) {
+      try { const r = parse(arquivos[i].conteudo); if (r) notas.push(r); else erros++; }
+      catch (e) { erros++; }
+      if ((i + 1) % CHUNK === 0) {
+        if (onProgress) onProgress(i + 1, arquivos.length);
+        await new Promise(res => setTimeout(res, 0)); // cede o controle p/ o navegador repintar
+      }
+    }
+    if (onProgress) onProgress(arquivos.length, arquivos.length);
+    return _finalizar(notas, arquivos.length, erros);
+  }
+
+  return { parse, processar, processarAsync, classificaItem, categoriaCfop, detectarEmpresaMisto,
     separarDirecao, periodo, montarPreview, fmtDoc,
     PAG, MODF, CRT, MESES, SUF_ENT, SUF_SAI, ORDEM_CAT, ORDEM_CLASS };
 })();

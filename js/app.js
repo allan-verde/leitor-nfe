@@ -20,28 +20,33 @@
   drop.addEventListener("drop", e => { if (e.dataTransfer.files.length) tratar(e.dataTransfer.files); });
 
   // ---- lê os arquivos (xml direto ou dentro de zip) ----
-  async function coletarXmls(fileList) {
+  async function coletarXmls(fileList, onProgress) {
     const arquivos = [];
     for (const f of fileList) {
       const nome = f.name.toLowerCase();
       if (nome.endsWith(".zip")) {
         const zip = await JSZip.loadAsync(await f.arrayBuffer());
         const entradas = Object.values(zip.files).filter(e => !e.dir && e.name.toLowerCase().endsWith(".xml"));
-        for (const e of entradas) arquivos.push({ nome: e.name, conteudo: await e.async("string") });
+        for (let i = 0; i < entradas.length; i++) {
+          arquivos.push({ nome: entradas[i].name, conteudo: await entradas[i].async("string") });
+          if (onProgress && arquivos.length % 100 === 0) onProgress(arquivos.length);
+        }
       } else if (nome.endsWith(".xml")) {
         arquivos.push({ nome: f.name, conteudo: await f.text() });
+        if (onProgress && arquivos.length % 100 === 0) onProgress(arquivos.length);
       }
     }
     return arquivos;
   }
 
   async function tratar(fileList) {
-    setStatus('<span class="spinner"></span> Lendo arquivo(s)…');
+    setStatus('<span class="spinner"></span> Lendo arquivos…');
     $("#resultado").style.display = "none";
     try {
-      const arquivos = await coletarXmls(fileList);
+      const arquivos = await coletarXmls(fileList, n => setStatus(`<span class="spinner"></span> Lendo arquivos… ${n} XML`));
       if (!arquivos.length) { setStatus("Nenhum XML encontrado nos arquivos selecionados.", "erro"); return; }
-      const res = NFE.processar(arquivos);
+      const res = await NFE.processarAsync(arquivos, (done, total) =>
+        setStatus(`<span class="spinner"></span> Processando notas… ${done.toLocaleString('pt-BR')}/${total.toLocaleString('pt-BR')}`));
       if (!res.ok) { setStatus("Erro: " + esc(res.erro), "erro"); return; }
       resultado = res;
       render(res.preview);
@@ -105,21 +110,26 @@
       <div style="padding:16px 14px 12px"><b style="color:var(--navy)">VENDAS (SAÍDAS)</b></div>${tabelaResumo("Natureza (categoria)", p.resumo_saidas)}
     </div>`;
   }
+  const LIMITE_LINHAS = 1000; // limita o que vai pra tela (a planilha exportada tem tudo)
   function panelNotas(notas, rotulo) {
     if (!notas.length) return `<div class="muted">Nenhuma nota.</div>`;
-    const body = notas.map(n => `<tr>
+    const mostradas = notas.slice(0, LIMITE_LINHAS);
+    const body = mostradas.map(n => `<tr>
       <td class="ctr">${esc(n.nNF)}</td><td class="ctr">${esc(n.serie)}</td><td class="ctr">${esc(n.data)}</td>
       <td class="ctr">${esc(n.mod)}</td><td>${esc(n.contraparte)}</td><td class="ctr">${esc(n.uf)}</td>
       <td>${esc(n.cfop)}</td><td>${esc(n.categoria)}</td>
       <td class="num">${fmtMoeda(n.vProd)}</td><td class="num">${fmtMoeda(n.vNF)}</td>
       <td class="num">${fmtMoeda(n.vICMS)}</td><td class="num">${fmtMoeda(n.vIPI)}</td></tr>`).join("");
     const tot = k => notas.reduce((s, n) => s + (n[k] || 0), 0);
+    const corte = notas.length > LIMITE_LINHAS
+      ? `<div class="muted">Mostrando as primeiras ${LIMITE_LINHAS.toLocaleString('pt-BR')} de ${notas.length.toLocaleString('pt-BR')} notas — a planilha exportada conterá todas.</div>`
+      : "";
     return `<div class="scroll"><table><thead><tr>
       <th>NF</th><th>Série</th><th>Data</th><th>Mod</th><th>${esc(rotulo)}</th><th>UF</th>
       <th>CFOP</th><th>Categoria</th><th>Vlr Produtos</th><th>Vlr NF</th><th>ICMS</th><th>IPI</th></tr></thead>
-      <tbody>${body}<tr class="total"><td colspan="8">TOTAL (${notas.length})</td>
+      <tbody>${body}<tr class="total"><td colspan="8">TOTAL (${notas.length.toLocaleString('pt-BR')})</td>
         <td class="num">${fmtMoeda(tot('vProd'))}</td><td class="num">${fmtMoeda(tot('vNF'))}</td>
-        <td class="num">${fmtMoeda(tot('vICMS'))}</td><td class="num">${fmtMoeda(tot('vIPI'))}</td></tr></tbody></table></div>`;
+        <td class="num">${fmtMoeda(tot('vICMS'))}</td><td class="num">${fmtMoeda(tot('vIPI'))}</td></tr></tbody></table></div>${corte}`;
   }
   function panelClass(linhas) {
     if (!linhas.length) return `<div class="muted">Sem itens de entrada para classificar.</div>`;
@@ -138,24 +148,57 @@
       <tbody>${body}</tbody></table></div>`;
   }
 
-  // ---- exportar ----
+  // ---- exportar (gera no Web Worker p/ não travar a UI; cai p/ thread principal se indisponível) ----
+  const EXPORT_LABEL = "⬇ Exportar planilha (.xlsx)";
+  let _worker = null;
+  function getWorker() {
+    if (_worker === null) { try { _worker = new Worker("js/worker.js"); } catch (e) { _worker = false; } }
+    return _worker;
+  }
+  function gerarBufferWorker(payload) {
+    return new Promise((resolve, reject) => {
+      const w = getWorker();
+      if (!w) return reject(new Error("worker indisponível"));
+      const onMsg = e => { cleanup(); (e.data && e.data.ok) ? resolve(e.data.buf) : reject(new Error((e.data && e.data.erro) || "falha no worker")); };
+      const onErr = e => { cleanup(); reject(new Error(e.message || "erro no worker")); };
+      function cleanup() { w.removeEventListener("message", onMsg); w.removeEventListener("error", onErr); }
+      w.addEventListener("message", onMsg); w.addEventListener("error", onErr);
+      w.postMessage(payload);
+    });
+  }
+  function setExporting(on) {
+    const btn = $("#exportar"); btn.disabled = on;
+    if (on) btn.innerHTML = '<span class="spinner"></span> Gerando planilha…';
+    else btn.textContent = EXPORT_LABEL;
+  }
+  function baixar(buf, nome) {
+    const blob = new Blob([buf], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a"); a.href = url; a.download = nome; a.click();
+    setTimeout(() => URL.revokeObjectURL(url), 2000);
+  }
   $("#exportar").onclick = async () => {
     if (!resultado) return;
-    const btn = $("#exportar"); const txt = btn.textContent;
-    btn.disabled = true; btn.textContent = "Gerando…";
+    setExporting(true);
+    const { entradas, saidas, empresa, periodo } = resultado;
+    const nomeEmp = (empresa.nome || "Empresa").split(/\s+/).slice(0, 3).join("_");
+    const nome = ("Relatorio_" + nomeEmp + (periodo.per ? "_" + periodo.per : "") + ".xlsx").replace(/\//g, "-");
     try {
-      const { entradas, saidas, empresa, periodo } = resultado;
-      const blob = await NFEExcel.gerarBlob(entradas, saidas, empresa, periodo.per, periodo.ini, periodo.fim);
-      const nomeEmp = (empresa.nome || "Empresa").split(/\s+/).slice(0, 3).join("_");
-      const nome = ("Relatorio_" + nomeEmp + (periodo.per ? "_" + periodo.per : "") + ".xlsx").replace(/\//g, "-");
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a"); a.href = url; a.download = nome; a.click();
-      setTimeout(() => URL.revokeObjectURL(url), 2000);
+      let buf;
+      try {
+        buf = await gerarBufferWorker({ entradas, saidas, empresa, periodo });
+      } catch (e) {
+        // fallback: gera na própria thread (ex.: Worker bloqueado em file://)
+        console.warn("Worker indisponível, gerando na thread principal:", e.message);
+        const blob = await NFEExcel.gerarBlob(entradas, saidas, empresa, periodo.per, periodo.ini, periodo.fim);
+        buf = await blob.arrayBuffer();
+      }
+      baixar(buf, nome);
     } catch (err) {
       setStatus("Erro ao gerar a planilha: " + esc(err.message || err), "erro");
       console.error(err);
     } finally {
-      btn.disabled = false; btn.textContent = txt;
+      setExporting(false);
     }
   };
   $("#novo").onclick = () => { resultado = null; $("#resultado").style.display = "none"; fileInput.value = ""; setStatus(""); window.scrollTo(0, 0); };

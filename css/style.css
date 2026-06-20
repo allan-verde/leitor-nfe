@@ -24,6 +24,7 @@ main{max-width:1180px;margin:0 auto;padding:24px}
 .erro{color:#b00020} .ok{color:#1b7a3d}
 .spinner{display:inline-block;width:16px;height:16px;border:3px solid var(--light);
          border-top-color:var(--navy);border-radius:50%;animation:spin .8s linear infinite;vertical-align:-3px}
+.btn .spinner{border-color:rgba(255,255,255,.4);border-top-color:#fff;margin-right:6px}
 @keyframes spin{to{transform:rotate(360deg)}}
 
 .card{background:#fff;border:1px solid var(--line);border-radius:8px;margin:16px 0;overflow:hidden}
