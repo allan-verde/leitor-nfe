@@ -93,6 +93,7 @@
     });
 
     $("#resultado").style.display = "block";
+    getWorker(); // pré-aquece o Worker (carrega o ExcelJS) p/ o 1º clique em exportar ser instantâneo
   }
 
   function tabelaResumo(titulo, bloco) {
@@ -171,6 +172,8 @@
     if (on) btn.innerHTML = '<span class="spinner"></span> Gerando planilha…';
     else btn.textContent = EXPORT_LABEL;
   }
+  // espera o navegador efetivamente repintar (2 frames) antes de seguir
+  const nextPaint = () => new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
   function baixar(buf, nome) {
     const blob = new Blob([buf], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
     const url = URL.createObjectURL(blob);
@@ -180,6 +183,7 @@
   $("#exportar").onclick = async () => {
     if (!resultado) return;
     setExporting(true);
+    await nextPaint(); // garante o feedback visual do botão antes do trabalho pesado
     const { entradas, saidas, empresa, periodo } = resultado;
     const nomeEmp = (empresa.nome || "Empresa").split(/\s+/).slice(0, 3).join("_");
     const nome = ("Relatorio_" + nomeEmp + (periodo.per ? "_" + periodo.per : "") + ".xlsx").replace(/\//g, "-");
